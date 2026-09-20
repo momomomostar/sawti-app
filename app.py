@@ -1,90 +1,87 @@
 # -*- coding: utf-8 -*-
-# صوتي 🎙️ — تطبيق استنساخ الصوت (ملف واحد كامل)
-import os, time, base64
+# صوتي 🎙️ استنساخ الصوت — ملف واحد كامل
+import os,time,base64
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, Form
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
+from fastapi import FastAPI,UploadFile,Form
+from fastapi.responses import FileResponse,JSONResponse,HTMLResponse,Response
 
-app = FastAPI(title="صوتي - استنساخ الصوت")
+app=FastAPI(title="صوتي")
+BD=Path(__file__).parent
+(BD/"samples").mkdir(exist_ok=True)
+(BD/"outputs").mkdir(exist_ok=True)
+db={}
 
-BASE_DIR = Path(__file__).parent
-SAMPLES_DIR = BASE_DIR / "samples"
-OUTPUTS_DIR = BASE_DIR / "outputs"
-SAMPLES_DIR.mkdir(exist_ok=True)
-OUTPUTS_DIR.mkdir(exist_ok=True)
+INDEX=r"""<!DOCTYPE html>
+<html lang="ar" dir="rtl"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🎙️ صوتي</title><link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon-192.png"><meta name="theme-color" content="#1e1e2f">
+<style>
+*{box-sizing:border-box;font-family:Tahoma,sans-serif}
+body{background:linear-gradient(135deg,#1e1e2f,#2d2d44);margin:0;padding:16px;color:#eee}
+h1{text-align:center;font-size:1.5rem}
+.c{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:16px;margin-bottom:16px}
+h2{margin:0 0 10px;font-size:1.05rem;color:#8be9fd}
+input,textarea,select{width:100%;padding:10px;border-radius:10px;border:1px solid #555;background:#2a2a3d;color:#fff;margin-bottom:10px;font-size:1rem}
+textarea{min-height:80px}
+button{padding:10px;border:none;border-radius:10px;font-size:1rem;font-weight:bold;cursor:pointer;width:100%}
+.b1{background:#8be9fd;color:#1e1e2f}.b2{background:#ff5555;color:#fff}.b2r{background:#50fa7b}
+.m{margin-top:10px;padding:10px;border-radius:10px;text-align:center;display:none}
+.ok{background:rgba(80,250,123,.15);color:#50fa7b;display:block}.er{background:rgba(255,85,85,.15);color:#ff6b6b;display:block}
+audio{width:100%;margin-top:10px}
+</style></head><body>
+<h1>🎙️ صوتي</h1>
+<div class="c"><h2>⚙️ الإعدادات</h2>
+<input id="k" type="password" placeholder="مفتاح ElevenLabs (مجاني من elevenlabs.io)">
+</div>
+<div class="c"><h2>1️⃣ سجّل عينة صوتك</h2>
+<input id="n" type="text" placeholder="اسم الصوت (مثال: صوتي)">
+<button id="r" class="b2">🔴 ابدأ التسجيل</button>
+<button id="s" class="b1" style="margin-top:8px" disabled>💾 حفظ العينة</button>
+<div id="m1" class="m"></div></div>
+<div class="c"><h2>2️⃣ اكتب رسالتك</h2>
+<select id="v"></select>
+<textarea id="t" placeholder="اكتب النص هنا..."></textarea>
+<button id="g" class="b1">▶️ اقرأ بنبرة صوتي</button>
+<div id="m2" class="m"></div>
+<audio id="p" controls style="display:none"></audio></div>
+<script>
+var k=document.getElementById('k'),r=document.getElementById('r'),s=document.getElementById('s'),
+g=document.getElementById('g'),v=document.getElementById('v');
+k.value=localStorage.getItem('ek')||'';
+k.oninput=function(){localStorage.setItem('ek',k.value)};
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});
+var mr,ch=[],bl=null,rc=false;
+r.onclick=async function(){
+if(!rc){try{var st=await navigator.mediaDevices.getUserMedia({audio:true});
+mr=new MediaRecorder(st);ch=[];
+mr.ondataavailable=function(e){ch.push(e.data)};
+mr.onstop=function(){bl=new Blob(ch,{type:mr.mimeType});s.disabled=false;msg('m1','تم التسجيل ✅',1)};
+mr.start();rc=true;r.textContent='⏹️ إيقاف';r.classList.add('b2r');msg('m1','جارٍ التسجيل... 🎤',1);
+}catch(e){msg('m1','الميكروفون مرفوض',0)}}else{mr.stop();mr.stream.getTracks().forEach(function(t){t.stop()});
+rc=false;r.textContent='🔴 ابدأ التسجيل';r.classList.remove('b2r')}
+};
+s.onclick=async function(){var n=document.getElementById('n').value.trim();
+if(!n||!bl){msg('m1','اكتب الاسم وسجّل أولاً',0);return}
+var f=new FormData();f.append('name',n);f.append('audio',bl,'a.webm');
+msg('m1','جارٍ الحفظ...',1);
+var d=await (await fetch('/save-sample',{method:'POST',body:f})).json();
+msg('m1',d.message||d.error,!!d.ok);ld()};
+async function ld(){var d=await (await fetch('/voices')).json();v.innerHTML='';
+d.voices.forEach(function(x){var o=document.createElement('option');o.value=o.textContent=x;v.appendChild(o)})}
+ld();
+g.onclick=async function(){var f=new FormData();
+f.append('name',v.value);f.append('text',document.getElementById('t').value);f.append('eleven_key',k.value);
+msg('m2','جارٍ التوليد... ⏳',1);g.disabled=true;
+var res=await fetch('/speak',{method:'POST',body:f});g.disabled=false;
+if(res.ok){var u=URL.createObjectURL(await res.blob());var p=document.getElementById('p');
+p.src=u;p.style.display='block';p.play();msg('m2','تم! 🎧',1)}
+else{var d=await res.json();msg('m2','خطأ: '+(d.error||'؟'),0)}};
+function msg(id,t,ok){var e=document.getElementById(id);e.textContent=t;e.className='m '+(ok?'ok':'er')}
+</script></body></html>"""
 
-voices_db: dict = {}
+MANIFEST=r"""{"name":"صوتي","short_name":"صوتي","start_url":"/","display":"standalone","dir":"rtl","lang":"ar","background_color":"#1e1e2f","theme_color":"#1e1e2f","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png"}]}"""
 
-INDEX_HTML = r"""PLACEHOLDER_HTML"""
+SW=r"""self.addEventListener('install',e=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(clients.claim()));self.addEventListener('fetch',e=>e.respondWith(fetch(e.request)));"""
 
-MANIFEST = r"""PLACEHOLDER_MANIFEST"""
-
-SW_JS = r"""PLACEHOLDER_SW"""
-
-ICON_192 = base64.b64decode("PLACEHOLDER_192")
-ICON_512 = base64.b64decode("PLACEHOLDER_512")
-
-
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return INDEX_HTML
-
-
-@app.get("/manifest.json")
-def manifest():
-    return Response(MANIFEST, media_type="application/json")
-
-
-@app.get("/sw.js")
-def sw():
-    return Response(SW_JS, media_type="application/javascript")
-
-
-@app.get("/icon-192.png")
-def i192():
-    return Response(ICON_192, media_type="image/png")
-
-
-@app.get("/icon-512.png")
-def i512():
-    return Response(ICON_512, media_type="image/png")
-
-
-@app.post("/save-sample")
-async def save_sample(name: str = Form(...), audio: UploadFile = Form(...)):
-    safe = "".join(c for c in name if c.isalnum() or c in (" ", "_", "-")).strip()
-    if not safe:
-        return JSONResponse(status_code=400, content={"error": "الاسم غير صالح"})
-    path = SAMPLES_DIR / f"{safe}.webm"
-    path.write_bytes(await audio.read())
-    voices_db[safe] = str(path)
-    return {"ok": True, "message": f"تم حفظ العينة «{safe}» ✅"}
-
-
-@app.get("/voices")
-def list_voices():
-    return {"voices": list(voices_db.keys())}
-
-
-@app.post("/speak")
-async def speak(name: str = Form(...), text: str = Form(...), eleven_key: str = Form("")):
-    if name not in voices_db:
-        return JSONResponse(status_code=404, content={"error": "احفظ عينة أولاً"})
-    api_key = eleven_key.strip() or os.getenv("ELEVENLABS_API_KEY", "")
-    if not api_key:
-        return JSONResponse(status_code=400, content={"error": "أدخل مفتاح ElevenLabs في الإعدادات"})
-    try:
-        from elevenlabs import ElevenLabs
-        client = ElevenLabs(api_key=api_key)
-        voice = client.voices.ivc.create(name=f"{name}_{int(time.time())}", files=[voices_db[name]])
-        audio = client.text_to_speech.convert(voice_id=voice.voice_id, text=text, model_id="eleven_multilingual_v2")
-        out = OUTPUTS_DIR / f"{name}_{int(time.time())}.mp3"
-        out.write_bytes(b"".join(audio))
-        return FileResponse(out, media_type="audio/mpeg", filename=out.name)
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"حدث خطأ: {e}"})
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+I192=base64.b64decode("H4sIAAAAAAAAA+3BAQ0AAADCIPqNHwAHHAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
