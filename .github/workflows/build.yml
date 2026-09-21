@@ -1,0 +1,807 @@
+name: build
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/example/camipro app/src/main/res/layout
+          cat > settings.gradle << 'RWF_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "CamiPro"
+          include ':app'
+          RWF_EOF
+          cat > build.gradle << 'RWF_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          RWF_EOF
+          cat > gradle.properties << 'RWF_EOF'
+          android.useAndroidX=true
+          android.enableJetifier=false
+          org.gradle.jvmargs=-Xmx2048m
+          RWF_EOF
+          cat > app/build.gradle << 'RWF_EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.camipro'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.example.camipro"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  release { minifyEnabled false }
+                  debug { applicationIdSuffix ".debug" }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+              buildFeatures { viewBinding true }
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.13.1'
+              implementation 'androidx.appcompat:appcompat:1.7.0'
+              implementation 'com.google.android.material:material:1.12.0'
+              implementation 'androidx.media3:media3-exoplayer:1.4.1'
+              implementation 'androidx.media3:media3-ui:1.4.1'
+              implementation 'org.videolan.android:libvlc-all:3.5.1'
+          }
+          RWF_EOF
+          cat > app/src/main/AndroidManifest.xml << 'RWF_EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application
+                  android:label="CamiPro"
+                  android:theme="@style/Theme.Material3.DayNight"
+                  android:usesCleartextTraffic="true">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity android:name=".LiveActivity" />
+                  <activity android:name=".RecordingsActivity" />
+                  <activity android:name=".PlayerActivity" />
+              </application>
+          </manifest>
+          RWF_EOF
+          cat > app/src/main/java/com/example/camipro/CameraStore.kt << 'RWF_EOF'
+          package com.example.camipro
+
+          import android.content.Context
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.util.UUID
+
+          class CameraStore(context: Context) {
+
+              data class Cam(
+                  val id: String, val name: String, val host: String,
+                  val port: Int, val path: String, val user: String, val pass: String
+              ) {
+                  fun rtspUrl(): String {
+                      val auth = if (user.isNotBlank()) "$user:$pass@" else ""
+                      return "rtsp://$auth$host:$port$path"
+                  }
+              }
+
+              private val prefs = context.getSharedPreferences("cams", Context.MODE_PRIVATE)
+
+              fun all(): MutableList<Cam> {
+                  val list = mutableListOf<Cam>()
+                  val arr = JSONArray(prefs.getString("list", "[]") ?: "[]")
+                  for (i in 0 until arr.length()) {
+                      val o = arr.getJSONObject(i)
+                      list.add(Cam(
+                          o.getString("id"), o.getString("name"), o.getString("host"),
+                          o.getInt("port"), o.getString("path"), o.getString("user"), o.getString("pass")
+                      ))
+                  }
+                  return list
+              }
+
+              fun upsert(cam: Cam) {
+                  val list = all()
+                  val idx = list.indexOfFirst { it.id == cam.id }
+                  if (idx >= 0) list[idx] = cam else list.add(cam)
+                  save(list)
+              }
+
+              fun remove(id: String) = save(all().filterNot { it.id == id })
+
+              private fun save(list: List<Cam>) {
+                  val arr = JSONArray()
+                  list.forEach { c ->
+                      arr.put(JSONObject().put("id", c.id).put("name", c.name).put("host", c.host)
+                          .put("port", c.port).put("path", c.path).put("user", c.user).put("pass", c.pass))
+                  }
+                  prefs.edit().putString("list", arr.toString()).apply()
+              }
+
+              companion object { fun newId() = UUID.randomUUID().toString() }
+          }
+          RWF_EOF
+          cat > app/src/main/java/com/example/camipro/MainActivity.kt << 'RWF_EOF'
+          package com.example.camipro
+
+          import android.content.Intent
+          import android.os.Bundle
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.Toast
+          import androidx.appcompat.app.AlertDialog
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.recyclerview.widget.LinearLayoutManager
+          import com.example.camipro.databinding.ActivityMainBinding
+
+          class MainActivity : AppCompatActivity() {
+              private lateinit var binding: ActivityMainBinding
+              private lateinit var store: CameraStore
+              private lateinit var adapter: CameraAdapter
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  binding = ActivityMainBinding.inflate(layoutInflater)
+                  setContentView(binding.root)
+                  title = "كاميراتي"
+                  store = CameraStore(this)
+                  adapter = CameraAdapter(
+                      onClick = { cam ->
+                          startActivity(Intent(this, LiveActivity::class.java)
+                              .putExtra("url", cam.rtspUrl()).putExtra("name", cam.name))
+                      },
+                      onLongClick = { cam ->
+                          AlertDialog.Builder(this)
+                              .setTitle(cam.name)
+                              .setItems(arrayOf("تعديل", "مسح")) { _, which ->
+                                  if (which == 0) showCameraDialog(cam)
+                                  else { store.remove(cam.id); refresh() }
+                              }
+                              .show()
+                          true
+                      }
+                  )
+                  binding.recycler.layoutManager = LinearLayoutManager(this)
+                  binding.recycler.adapter = adapter
+                  binding.fabAdd.setOnClickListener { showCameraDialog(null) }
+                  binding.btnRecordings.setOnClickListener {
+                      startActivity(Intent(this, RecordingsActivity::class.java))
+                  }
+              }
+
+              override fun onResume() { super.onResume(); refresh() }
+
+              private fun refresh() = adapter.submit(store.all())
+
+              private fun showCameraDialog(existing: CameraStore.Cam?) {
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(48, 24, 48, 8)
+                  }
+                  val etName = EditText(this).apply { hint = "اسم الكاميرا (مثال: الكور)" }
+                  val etHost = EditText(this).apply { hint = "عنوان IP (مثال: 192.168.1.20)" }
+                  val etPort = EditText(this).apply { hint = "المنفذ (554)"; setText("554") }
+                  val etPath = EditText(this).apply { hint = "المسار (مثال: /live/ch00_0)"; setText("/live/ch00_0") }
+                  val etUser = EditText(this).apply { hint = "المستخدم (إلا كان)" }
+                  val etPass = EditText(this).apply { hint = "كلمة السر (إلا كانت)" }
+                  existing?.let {
+                      etName.setText(it.name); etHost.setText(it.host)
+                      etPort.setText(it.port.toString()); etPath.setText(it.path)
+                      etUser.setText(it.user); etPass.setText(it.pass)
+                  }
+                  listOf(etName, etHost, etPort, etPath, etUser, etPass).forEach { layout.addView(it) }
+
+                  AlertDialog.Builder(this)
+                      .setTitle(if (existing == null) "زيد كاميرا" else "بدّل الكاميرا")
+                      .setView(layout)
+                      .setPositiveButton("سجّل") { _, _ ->
+                          val host = etHost.text.toString().trim()
+                          if (host.isEmpty()) {
+                              Toast.makeText(this, "العنوان خاوي", Toast.LENGTH_SHORT).show()
+                              return@setPositiveButton
+                          }
+                          val path = etPath.text.toString().ifBlank { "/live/ch00_0" }
+                              .let { if (it.startsWith("/")) it else "/$it" }
+                          store.upsert(CameraStore.Cam(
+                              existing?.id ?: CameraStore.newId(),
+                              etName.text.toString().ifBlank { host },
+                              host,
+                              etPort.text.toString().toIntOrNull() ?: 554,
+                              path,
+                              etUser.text.toString().trim(),
+                              etPass.text.toString()
+                          ))
+                          refresh()
+                      }
+                      .setNegativeButton("لا", null)
+                      .show()
+              }
+          }
+          RWF_EOF
+          cat > app/src/main/java/com/example/camipro/CameraAdapter.kt << 'RWF_EOF'
+          package com.example.camipro
+
+          import android.view.LayoutInflater
+          import android.view.ViewGroup
+          import androidx.recyclerview.widget.RecyclerView
+          import com.example.camipro.databinding.ItemCameraBinding
+
+          class CameraAdapter(
+              private val onClick: (CameraStore.Cam) -> Unit,
+              private val onLongClick: (CameraStore.Cam) -> Unit
+          ) : RecyclerView.Adapter<CameraAdapter.VH>() {
+
+              private val items = mutableListOf<CameraStore.Cam>()
+
+              fun submit(list: List<CameraStore.Cam>) {
+                  items.clear(); items.addAll(list); notifyDataSetChanged()
+              }
+
+              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
+                  VH(ItemCameraBinding.inflate(LayoutInflater.from(parent.context), parent, false))
+
+              override fun getItemCount() = items.size
+
+              override fun onBindViewHolder(h: VH, pos: Int) {
+                  val cam = items[pos]
+                  h.b.txtName.text = cam.name
+                  h.b.txtUrl.text = cam.rtspUrl()
+                  h.b.root.setOnClickListener { onClick(cam) }
+                  h.b.root.setOnLongClickListener { onLongClick(cam); true }
+              }
+
+              class VH(val b: ItemCameraBinding) : RecyclerView.ViewHolder(b.root)
+          }
+          RWF_EOF
+          cat > app/src/main/java/com/example/camipro/LiveActivity.kt << 'RWF_EOF'
+          package com.example.camipro
+
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.View
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import com.example.camipro.databinding.ActivityLiveBinding
+          import org.videolan.libvlc.LibVLC
+          import org.videolan.libvlc.Media
+          import org.videolan.libvlc.MediaPlayer
+          import java.io.File
+
+          class LiveActivity : AppCompatActivity() {
+              private lateinit var b: ActivityLiveBinding
+              private lateinit var libVlc: LibVLC
+              private lateinit var player: MediaPlayer
+              private val handler = Handler(Looper.getMainLooper())
+              private var recording = false
+              private var recFile: File? = null
+
+              private val url: String get() = intent.getStringExtra("url") ?: ""
+
+              private val blinker = object : Runnable {
+                  override fun run() {
+                      b.txtRec.visibility = if (b.txtRec.visibility == View.VISIBLE) View.INVISIBLE else View.VISIBLE
+                      handler.postDelayed(this, 600)
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  b = ActivityLiveBinding.inflate(layoutInflater)
+                  setContentView(b.root)
+                  title = intent.getStringExtra("name") ?: "كاميرا"
+                  b.txtStatus.text = "كيتصل..."
+
+                  libVlc = LibVLC(this, arrayListOf(
+                      "--rtsp-tcp", "--network-caching=300",
+                      "--no-drop-late-frames", "--no-skip-frames"
+                  ))
+                  player = MediaPlayer(libVlc)
+                  player.setEventListener { e ->
+                      runOnUiThread {
+                          when (e.type) {
+                              MediaPlayer.Event.Playing ->
+                                  b.txtStatus.text = if (recording) "كيسجّل دابا..." else "مباشر"
+                              MediaPlayer.Event.EncounteredError ->
+                                  b.txtStatus.text = "مشكل فالاتصال — تحقق من الرابط"
+                              else -> {}
+                          }
+                      }
+                  }
+                  play(withRecord = false)
+
+                  b.btnRecord.setOnClickListener {
+                      if (recording) stopRecording() else startRecording()
+                  }
+              }
+
+              private fun recordingsDir(): File {
+                  val dir = File(getExternalFilesDir(null), "recordings")
+                  dir.mkdirs()
+                  return dir
+              }
+
+              private fun play(withRecord: Boolean) {
+                  player.stop()
+                  val media = Media(libVlc, Uri.parse(url))
+                  media.setHWDecoderEnabled(true, false)
+                  if (withRecord) {
+                      recFile = File(recordingsDir(), "rec_${System.currentTimeMillis()}.mp4")
+                      media.addOption(":sout=#standard{access=file,mux=mp4,dst=${recFile!!.absolutePath}}")
+                      media.addOption(":sout-keep")
+                      media.addOption(":sout-all")
+                  }
+                  player.media = media
+                  player.attachViews(b.vlcLayout, null, false, false)
+                  player.play()
+                  media.release()
+                  recording = withRecord
+                  updateRecUI()
+              }
+
+              private fun startRecording() {
+                  play(withRecord = true)
+                  Toast.makeText(this, "بدى التسجيل", Toast.LENGTH_SHORT).show()
+              }
+
+              private fun stopRecording() {
+                  val f = recFile
+                  play(withRecord = false)
+                  Toast.makeText(this, "تسجّل الملف: ${f?.name}", Toast.LENGTH_LONG).show()
+              }
+
+              private fun updateRecUI() {
+                  b.btnRecord.text = if (recording) "وقّف التسجيل" else "تسجيل"
+                  if (recording) handler.post(blinker) else {
+                      handler.removeCallbacks(blinker)
+                      b.txtRec.visibility = View.GONE
+                  }
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(blinker)
+                  player.release()
+                  libVlc.release()
+                  super.onDestroy()
+              }
+          }
+          RWF_EOF
+          cat > app/src/main/java/com/example/camipro/RecordingsActivity.kt << 'RWF_EOF'
+          package com.example.camipro
+
+          import android.content.Intent
+          import android.os.Bundle
+          import android.view.LayoutInflater
+          import android.view.View
+          import android.view.ViewGroup
+          import androidx.appcompat.app.AlertDialog
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.recyclerview.widget.LinearLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+          import com.example.camipro.databinding.ActivityRecordingsBinding
+          import com.example.camipro.databinding.ItemRecordingBinding
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class RecordingsActivity : AppCompatActivity() {
+              private lateinit var b: ActivityRecordingsBinding
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  b = ActivityRecordingsBinding.inflate(layoutInflater)
+                  setContentView(b.root)
+                  title = "التسجيلات المحلية"
+                  b.recycler.layoutManager = LinearLayoutManager(this)
+              }
+
+              override fun onResume() { super.onResume(); load() }
+
+              private fun files(): List<File> {
+                  val dir = File(getExternalFilesDir(null), "recordings")
+                  return dir.listFiles { f -> f.extension == "mp4" && f.length() > 1024 }
+                      ?.sortedByDescending { it.lastModified() } ?: emptyList()
+              }
+
+              private fun load() {
+                  val list = files()
+                  b.txtEmpty.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+                  b.recycler.adapter = RecAdapter(list,
+                      onClick = { f ->
+                          startActivity(Intent(this, PlayerActivity::class.java)
+                              .putExtra("path", f.absolutePath).putExtra("name", f.name))
+                      },
+                      onLongClick = { f ->
+                          AlertDialog.Builder(this)
+                              .setTitle("مسح التسجيل؟")
+                              .setMessage(f.name)
+                              .setPositiveButton("مسح") { _, _ -> f.delete(); load() }
+                              .setNegativeButton("لا", null)
+                              .show()
+                          true
+                      })
+              }
+
+              class RecAdapter(
+                  private val items: List<File>,
+                  private val onClick: (File) -> Unit,
+                  private val onLongClick: (File) -> Unit
+              ) : RecyclerView.Adapter<RecAdapter.VH>() {
+
+                  override fun onCreateViewHolder(p: ViewGroup, vt: Int) =
+                      VH(ItemRecordingBinding.inflate(LayoutInflater.from(p.context), p, false))
+
+                  override fun getItemCount() = items.size
+
+                  override fun onBindViewHolder(h: VH, pos: Int) {
+                      val f = items[pos]
+                      val ts = f.nameWithoutExtension.removePrefix("rec_").toLongOrNull()
+                      h.b.txtFile.text = ts?.let {
+                          SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(it))
+                      } ?: f.name
+                      h.b.txtSize.text = "%.1f MB".format(f.length() / 1024f / 1024f)
+                      h.b.root.setOnClickListener { onClick(f) }
+                      h.b.root.setOnLongClickListener { onLongClick(f); true }
+                  }
+
+                  class VH(val b: ItemRecordingBinding) : RecyclerView.ViewHolder(b.root)
+              }
+          }
+          RWF_EOF
+          cat > app/src/main/java/com/example/camipro/PlayerActivity.kt << 'RWF_EOF'
+          package com.example.camipro
+
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.media3.common.C
+          import androidx.media3.common.MediaItem
+          import androidx.media3.exoplayer.ExoPlayer
+          import com.example.camipro.databinding.ActivityPlayerBinding
+          import com.google.android.material.chip.Chip
+          import java.io.File
+
+          class PlayerActivity : AppCompatActivity() {
+              private lateinit var b: ActivityPlayerBinding
+              private var player: ExoPlayer? = null
+
+              // المستويات ديال السرعة — زيد ولا نقص من هنا بسهولة
+              private val speeds = floatArrayOf(
+                  0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 3f,
+                  4f, 6f, 8f, 12f, 16f, 24f, 32f, 48f, 64f
+              )
+              private val fastSeekThreshold = 16f // من هاد السرعة كنستعمل القفز السريع
+              private var currentSpeed = 1f
+              private val handler = Handler(Looper.getMainLooper())
+
+              private val fastSeekRunnable = object : Runnable {
+                  override fun run() {
+                      val p = player ?: return
+                      val next = p.currentPosition + (currentSpeed * 100).toLong()
+                      val dur = p.duration
+                      if (dur != C.TIME_UNSET && next >= dur) {
+                          p.seekTo(dur)
+                          applySpeed(1f)
+                          return
+                      }
+                      p.seekTo(next)
+                      handler.postDelayed(this, 100)
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  b = ActivityPlayerBinding.inflate(layoutInflater)
+                  setContentView(b.root)
+                  val path = intent.getStringExtra("path") ?: return finish()
+                  title = "مشغّل التسجيلات"
+
+                  player = ExoPlayer.Builder(this).build().also { p ->
+                      b.playerView.player = p
+                      p.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(path))))
+                      p.prepare()
+                      p.playWhenReady = true
+                  }
+                  buildChips()
+                  b.sliderSpeed.addOnChangeListener { _, v, fromUser ->
+                      if (fromUser) applySpeed(v)
+                  }
+                  updateSpeedLabel()
+              }
+
+              private fun buildChips() {
+                  speeds.forEach { s ->
+                      val chip = Chip(this).apply {
+                          text = formatSpeed(s)
+                          isCheckable = true
+                          isChecked = s == 1f
+                          tag = s
+                          setOnClickListener { applySpeed(s) }
+                      }
+                      b.chips.addView(chip)
+                  }
+              }
+
+              private fun applySpeed(s: Float) {
+                  currentSpeed = s
+                  val p = player ?: return
+                  if (s >= fastSeekThreshold) {
+                      // القفز السريع: مضمون حتى على الهواتف الضعاف
+                      p.playWhenReady = false
+                      handler.removeCallbacks(fastSeekRunnable)
+                      handler.post(fastSeekRunnable)
+                  } else {
+                      handler.removeCallbacks(fastSeekRunnable)
+                      p.setPlaybackSpeed(s)
+                      p.playWhenReady = true
+                  }
+                  for (i in 0 until b.chips.childCount) {
+                      val chip = b.chips.getChildAt(i) as? Chip
+                      chip?.isChecked = (chip?.tag as? Float) == s
+                  }
+                  b.sliderSpeed.value = s.coerceIn(b.sliderSpeed.valueFrom, b.sliderSpeed.valueTo)
+                  updateSpeedLabel()
+              }
+
+              private fun updateSpeedLabel() {
+                  b.txtSpeed.text = "السرعة: ${formatSpeed(currentSpeed)}" +
+                      if (currentSpeed >= fastSeekThreshold) " (قفز سريع)" else ""
+              }
+
+              private fun formatSpeed(s: Float) =
+                  if (s == s.toLong().toFloat()) "${s.toLong()}x" else "${s}x"
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(fastSeekRunnable)
+                  player?.release()
+                  super.onDestroy()
+              }
+          }
+          RWF_EOF
+          cat > app/src/main/res/layout/activity_main.xml << 'RWF_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:gravity="center_vertical"
+                  android:orientation="horizontal"
+                  android:padding="12dp">
+
+                  <TextView
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:text="الكاميرات ديالي"
+                      android:textSize="20sp"
+                      android:textStyle="bold" />
+
+                  <Button
+                      android:id="@+id/btnRecordings"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:text="التسجيلات" />
+              </LinearLayout>
+
+              <FrameLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1">
+
+                  <androidx.recyclerview.widget.RecyclerView
+                      android:id="@+id/recycler"
+                      android:layout_width="match_parent"
+                      android:layout_height="match_parent" />
+
+                  <com.google.android.material.floatingactionbutton.FloatingActionButton
+                      android:id="@+id/fabAdd"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_gravity="bottom|end"
+                      android:layout_margin="16dp"
+                      android:src="@android:drawable/ic_input_add" />
+              </FrameLayout>
+          </LinearLayout>
+          RWF_EOF
+          cat > app/src/main/res/layout/item_camera.xml << 'RWF_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:background="?android:attr/selectableItemBackground"
+              android:orientation="vertical"
+              android:padding="16dp">
+
+              <TextView
+                  android:id="@+id/txtName"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:textSize="17sp"
+                  android:textStyle="bold" />
+
+              <TextView
+                  android:id="@+id/txtUrl"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:textColor="?android:attr/textColorSecondary"
+                  android:textSize="13sp" />
+          </LinearLayout>
+          RWF_EOF
+          cat > app/src/main/res/layout/activity_live.xml << 'RWF_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#000"
+              android:orientation="vertical">
+
+              <FrameLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1">
+
+                  <org.videolan.libvlc.util.VLCVideoLayout
+                      android:id="@+id/vlcLayout"
+                      android:layout_width="match_parent"
+                      android:layout_height="match_parent" />
+
+                  <TextView
+                      android:id="@+id/txtRec"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_gravity="top|start"
+                      android:layout_margin="16dp"
+                      android:background="#CC0000"
+                      android:padding="6dp"
+                      android:text="REC"
+                      android:textColor="#fff"
+                      android:visibility="gone" />
+              </FrameLayout>
+
+              <TextView
+                  android:id="@+id/txtStatus"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:gravity="center"
+                  android:padding="8dp"
+                  android:textColor="#fff" />
+
+              <Button
+                  android:id="@+id/btnRecord"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_margin="12dp"
+                  android:text="تسجيل" />
+          </LinearLayout>
+          RWF_EOF
+          cat > app/src/main/res/layout/activity_recordings.xml << 'RWF_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+
+              <androidx.recyclerview.widget.RecyclerView
+                  android:id="@+id/recycler"
+                  android:layout_width="match_parent"
+                  android:layout_height="match_parent" />
+
+              <TextView
+                  android:id="@+id/txtEmpty"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_gravity="center"
+                  android:text="ما كاين حتى تسجيل"
+                  android:visibility="gone" />
+          </FrameLayout>
+          RWF_EOF
+          cat > app/src/main/res/layout/item_recording.xml << 'RWF_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:background="?android:attr/selectableItemBackground"
+              android:orientation="vertical"
+              android:padding="16dp">
+
+              <TextView
+                  android:id="@+id/txtFile"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:textSize="16sp" />
+
+              <TextView
+                  android:id="@+id/txtSize"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:textColor="?android:attr/textColorSecondary"
+                  android:textSize="13sp" />
+          </LinearLayout>
+          RWF_EOF
+          cat > app/src/main/res/layout/activity_player.xml << 'RWF_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#000"
+              android:orientation="vertical">
+
+              <androidx.media3.ui.PlayerView
+                  android:id="@+id/playerView"
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1" />
+
+              <TextView
+                  android:id="@+id/txtSpeed"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:gravity="center"
+                  android:padding="6dp"
+                  android:textColor="#fff" />
+
+              <HorizontalScrollView
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:paddingStart="8dp"
+                  android:paddingEnd="8dp">
+
+                  <com.google.android.material.chip.ChipGroup
+                      android:id="@+id/chips"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      app:singleLine="true" />
+              </HorizontalScrollView>
+
+              <com.google.android.material.slider.Slider
+                  android:id="@+id/sliderSpeed"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginStart="16dp"
+                  android:layout_marginEnd="16dp"
+                  android:stepSize="0.25"
+                  android:valueFrom="0.25"
+                  android:valueTo="64" />
+          </LinearLayout>
+          RWF_EOF
+          gradle assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
